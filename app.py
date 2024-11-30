@@ -29,29 +29,27 @@ from selenium import webdriver
 from pdfminer.high_level import extract_text
 from streamlit_tags import st_tags
 from PIL import Image
-import nltk
-import spacy
-import nltk
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from nltk.corpus import stopwords
 from nltk.tokenize import word_tokenize
 from selenium.webdriver.common.by import By
 import spacy
 from spacy.cli import download
 import requests
 from bs4 import BeautifulSoup
-
+from dotenv import load_dotenv
+load_dotenv() 
 #gensim
 import gensim
 from gensim import corpora
-
+import math
 #Visualization
 from spacy import displacy
 import pyLDAvis.gensim_models
 from wordcloud import WordCloud
 import jsonlines
-
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
 #nltk
 import re
 import nltk
@@ -72,10 +70,6 @@ except OSError:
 
 
 nlp = spacy.load('en_core_web_sm')
-
-skills_keywords = ["python", "java", "machine learning", "data analysis", "sql", "project management",
-                   "cloud computing", "aws", "azure", "docker", "react", "node.js", "deep learning"]
-
 nltk.download('punkt')
 nltk.download('averaged_perceptron_tagger')
 nltk.download('maxent_ne_chunker')
@@ -96,9 +90,6 @@ def get_device_info():
     }
 
 def init_database():
-    """
-    Initializes the database by creating necessary tables if they don't exist.
-    """
     connection = get_database_connection()
     if connection:
         try:
@@ -134,23 +125,19 @@ def init_database():
 
 
 def get_database_connection():
-    """
-    Establishes and returns a database connection.
-
-    Returns:
-    pymysql.connections.Connection: A database connection object.
-    """
     try:
         connection = pymysql.connect(
             host=os.getenv('DB_HOST', 'localhost'),
             user=os.getenv('DB_USER', 'root'),
-            password=os.getenv('', 'SQLpassword')
+            password=os.getenv('DB_PASSWORD', 'SQLpassword')
             
         )
          # Create a cursor object
         with connection.cursor() as cursor:
             # Create the database if it does not exist
-            cursor.execute("CREATE DATABASE IF NOT EXISTS AdminAccess")
+            database_name = os.getenv('DB_NAME', 'AdminAccess') 
+            cursor.execute(f"CREATE DATABASE IF NOT EXISTS `{database_name}`")
+            #cursor.execute("CREATE DATABASE IF NOT EXISTS {os.getenv('DB_NAME', 'AdminAccess')}")
 
         # Reconnect to the MySQL server with the database
         connection.close()
@@ -182,7 +169,7 @@ def analyze_resume(pdf_path):
     nltk.download(['stopwords', 'wordnet'])
     nlp = spacy.load("en_core_web_lg")
     # Add an entity ruler to recognize skills
-    skill_pattern_path = "jz_skill_patterns.jsonl"
+    skill_pattern_path = "skill_patterns.jsonl"
     ruler = nlp.add_pipe("entity_ruler", before="ner")
     ruler.from_disk(skill_pattern_path)
     # Load the SpaCy models
@@ -290,22 +277,24 @@ def analyze_resume(pdf_path):
         phone = phones[0] if phones else "Not found"
 
     # Extract education
-    from fuzzywuzzy import fuzz
-    education = []
+    education = set()
+    text_r = extract_text(pdf_path)
+    #doc_resume = nlp(text_r)
+    doc_resume = nlp(text_r.lower())
     with open('education_degrees.json', 'r') as f:
         data = json.load(f)
         education_degrees = data['degrees']
-    # Assuming resume_doc is a spaCy document
-    for sent in resume_doc.sents:
-        # Iterate through each education degree
-        sent_text = sent.text.strip()
-        sent_text_lower = sent_text.lower()
-        for degree in education_degrees:
-            # Perform fuzzy matching
-            ratio = fuzz.ratio(degree.lower(), sent_text_lower)
-            # If the score is above a certain threshold, extract the degree
-            if ratio > 80:
-                education.append(degree) 
+
+    for keyword in education_degrees:
+        matcher = spacy.matcher.PhraseMatcher(nlp.vocab)
+        pattern = [nlp(keyword)]
+        matcher.add("EDUCATION_KEYWORD", pattern)
+        matches = matcher(doc_resume)
+        for match_id, start, end in matches:
+            span = doc_resume[start:end]
+            education.add(span.text)
+    education_list = list(education)  
+    degree = education_list[0]
 
     skills_found = [ent.text for ent in resume_doc.ents if ent.label_ == "SKILL"]
 
@@ -328,7 +317,7 @@ def analyze_resume(pdf_path):
 
     experience = list(set(experience))  # Convert to set to remove duplicates
 
-    # Calculate the resume score
+    # Calculate the resume score(adapted of each job offer)
     required_skills = set([
         "Python", "Machine Learning", "Data Analysis", "Project Management",
         "Cloud Computing", "SQL"
@@ -344,7 +333,8 @@ def analyze_resume(pdf_path):
         "email": email,
         "mobile_number": phone,
         "skills": set(list(skills_found)),
-        "education": education,
+        "degree": degree,
+        #"education": education,
         "experience": experience,
         "resume_score": resume_score
     }
@@ -490,11 +480,13 @@ def display_resume_analysis(resume_data, user_name):
     Args:
     resume_data (dict): A dictionary containing the analyzed resume data.
     """
-    st.subheader("Basic Information")
+    
+    #st.subheader("Basic Information")
     st.subheader(f"Resume Analysis Results for {user_name}")
     st.write(f"Name: {resume_data.get('name', user_name)}")
     st.write(f"Email: {resume_data.get('email', '')}")
     st.write(f"Phone: {resume_data.get('mobile_number', ' ')}")
+    #st.write(f"Degree: {resume_data.get('degree', 'No Degree')}")
     st.write(f"Degree: {resume_data.get('degree', 'No Degree')}")
     
     experience = resume_data.get('total_experience', 0)
@@ -536,6 +528,17 @@ def display_resume_analysis(resume_data, user_name):
     for category, score in score_breakdown.items():
         st.write(f"{category}: {score}/10")
 
+    categories = list(score_breakdown.keys())
+    scores = list(score_breakdown.values())
+
+    fig = px.bar(x=categories, y=scores, 
+                 title="Resume Score Distribution by Category",
+                 labels={'x': 'Category', 'y': 'Score'})
+    st.plotly_chart(fig)
+    
+
+    
+
     user_data = {
         "name": resume_data.get('name', user_name),
         "email": resume_data.get('email', 'Not found'),
@@ -569,15 +572,6 @@ def offer_pdf_download(resume_data):
         mime="application/pdf"
     )
 
-def display_additional_resources():
-    """
-    Displays additional resources such as resume writing tips and interview preparation videos.
-    """
-    st.subheader("Resume Writing Tips")
-    st.video("https://www.youtube.com/")
-
-    st.subheader("Interview Preparation Tips")
-    st.video("https://www.youtube.com/watch?v=Ji46s5BHdr0")
 
 def calculate_resume_score(resume_data):
     score_breakdown = get_resume_score_breakdown(resume_data)
@@ -592,7 +586,7 @@ def get_resume_score_breakdown(resume_data):
         "Projects": 0,
         "Certifications": 0,
         "Summary/Objective": 0,
-        "Achievements": 0,
+        #"Achievements": 0,
         "Formatting": 0,
         "Keywords": 0
     }
@@ -601,11 +595,11 @@ def get_resume_score_breakdown(resume_data):
     if resume_data.get('email'): score_breakdown["Contact Information"] += 3
     if resume_data.get('mobile_number'): score_breakdown["Contact Information"] += 4
     
-    if resume_data.get('degree'): score_breakdown["Education"] += 5
+    if resume_data.get('degree'): score_breakdown["Education"] += 10
     if resume_data.get('college_name'): score_breakdown["Education"] += 5
     
     skills = resume_data.get('skills', [])
-    score_breakdown["Skills"] = min(len(skills), 10)
+    score_breakdown["Skills"] = min(len(skills), 15)
     
     experience = resume_data.get('total_experience', 0)
     score_breakdown["Experience"] = min(experience * 2, 10)
@@ -618,8 +612,8 @@ def get_resume_score_breakdown(resume_data):
     
     if resume_data.get('summary'): score_breakdown["Summary/Objective"] = 10
     
-    achievements = resume_data.get('achievements', [])
-    score_breakdown["Achievements"] = min(len(achievements) * 2, 10)
+    #achievements = resume_data.get('achievements', [])
+    #score_breakdown["Achievements"] = min(len(achievements) * 2, 10)
     
     score_breakdown["Formatting"] = 8
     score_breakdown["Keywords"] = 7
@@ -807,6 +801,7 @@ def store_feedback(feedback_data):
     Returns:
     bool: True if the feedback was successfully stored, False otherwise.
     """
+    
     try:
         connection = pymysql.connect(
             host=os.getenv('DB_HOST', 'localhost'),
